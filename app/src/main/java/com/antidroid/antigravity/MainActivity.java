@@ -15,8 +15,10 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.Message;
+import android.os.SystemClock;
 import android.view.PixelCopy;
 import android.view.View;
 import android.webkit.CookieManager;
@@ -78,17 +80,21 @@ public class MainActivity extends AppCompatActivity {
     private TextView errorMessage;
 
     private int statusBarHeight = 0;
-    private int currentStatusBarColor = Color.parseColor("#070707");
-    private final Handler statusBarHandler = new Handler(Looper.getMainLooper());
-    private final Bitmap sampleBitmap = Bitmap.createBitmap(5, 1, Bitmap.Config.ARGB_8888);
-    private boolean isSamplingStatusBar = false;
+    private volatile int currentStatusBarColor = Color.parseColor("#070707");
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private HandlerThread samplerThread;
+    private Handler samplerHandler;
+    private final Bitmap sampleBitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888);
+    private volatile boolean isSamplingStatusBar = false;
+    private volatile boolean copyInFlight = false;
+    private long lastSampleTimeMs = 0L;
 
     private final Runnable statusBarSampler = new Runnable() {
         @Override
         public void run() {
-            sampleTopEdgeColor();
+            sampleTopEdgeColor(false);
             if (isSamplingStatusBar) {
-                statusBarHandler.postDelayed(this, 250);
+                mainHandler.postDelayed(this, 60);
             }
         }
     };
@@ -137,6 +143,10 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+
+        samplerThread = new HandlerThread("StatusBarSampler");
+        samplerThread.start();
+        samplerHandler = new Handler(samplerThread.getLooper());
 
         configureSystemBars();
 
@@ -221,33 +231,50 @@ public class MainActivity extends AppCompatActivity {
         controller.setAppearanceLightStatusBars(luminance > 0.5);
     }
 
-    private void sampleTopEdgeColor() {
-        if (!isSamplingStatusBar || sampleBitmap.isRecycled() || statusBarHeight <= 0
+    private void sampleTopEdgeColor(boolean force) {
+        if (!isSamplingStatusBar || copyInFlight || sampleBitmap.isRecycled()
+                || samplerHandler == null || statusBarHeight <= 0
                 || rootContainer == null
                 || rootContainer.getWidth() < 20
                 || rootContainer.getHeight() <= statusBarHeight + 10) {
             return;
         }
+        long now = SystemClock.uptimeMillis();
+        if (!force && (now - lastSampleTimeMs) < 45) {
+            return;
+        }
+        lastSampleTimeMs = now;
+        copyInFlight = true;
         int y = statusBarHeight + 4;
-        Rect srcRect = new Rect(4, y, 9, y + 1);
+        Rect srcRect = new Rect(6, y, 7, y + 1);
         try {
             PixelCopy.request(getWindow(), srcRect, sampleBitmap, copyResult -> {
-                if (copyResult == PixelCopy.SUCCESS && !sampleBitmap.isRecycled()) {
-                    int pixel = sampleBitmap.getPixel(2, 0);
-                    int opaqueColor = Color.rgb(Color.red(pixel), Color.green(pixel), Color.blue(pixel));
-                    if (opaqueColor != currentStatusBarColor) {
-                        currentStatusBarColor = opaqueColor;
-                        rootContainer.setBackgroundColor(opaqueColor);
-                        WindowInsetsControllerCompat controller =
-                                WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
-                        if (controller != null) {
-                            updateStatusBarIconContrast(controller, opaqueColor);
+                try {
+                    if (copyResult == PixelCopy.SUCCESS && !sampleBitmap.isRecycled()) {
+                        int pixel = sampleBitmap.getPixel(0, 0);
+                        int opaqueColor = Color.rgb(
+                                Color.red(pixel), Color.green(pixel), Color.blue(pixel));
+                        if (opaqueColor != currentStatusBarColor) {
+                            currentStatusBarColor = opaqueColor;
+                            mainHandler.post(() -> {
+                                if (rootContainer != null) {
+                                    rootContainer.setBackgroundColor(opaqueColor);
+                                }
+                                WindowInsetsControllerCompat controller =
+                                        WindowCompat.getInsetsController(
+                                                getWindow(), getWindow().getDecorView());
+                                if (controller != null) {
+                                    updateStatusBarIconContrast(controller, opaqueColor);
+                                }
+                            });
                         }
                     }
+                } finally {
+                    copyInFlight = false;
                 }
-            }, statusBarHandler);
+            }, samplerHandler);
         } catch (IllegalArgumentException ignored) {
-            // Window surface not ready yet
+            copyInFlight = false;
         }
     }
 
@@ -314,6 +341,13 @@ public class MainActivity extends AppCompatActivity {
                 super.onPageStarted(view, url, favicon);
                 hasMainFrameError = false;
                 progressBar.setVisibility(View.VISIBLE);
+                sampleTopEdgeColor(true);
+            }
+
+            @Override
+            public void onPageCommitVisible(WebView view, String url) {
+                super.onPageCommitVisible(view, url);
+                sampleTopEdgeColor(true);
             }
 
             @Override
@@ -321,6 +355,7 @@ public class MainActivity extends AppCompatActivity {
                 super.onPageFinished(view, url);
                 progressBar.setVisibility(View.GONE);
                 CookieManager.getInstance().flush();
+                sampleTopEdgeColor(true);
                 if (!firstPageLoaded) {
                     firstPageLoaded = true;
                     splashOverlay.animate()
@@ -537,14 +572,14 @@ public class MainActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
         isSamplingStatusBar = true;
-        statusBarHandler.removeCallbacks(statusBarSampler);
-        statusBarHandler.postDelayed(statusBarSampler, 200);
+        mainHandler.removeCallbacks(statusBarSampler);
+        mainHandler.post(statusBarSampler);
     }
 
     @Override
     protected void onPause() {
         isSamplingStatusBar = false;
-        statusBarHandler.removeCallbacks(statusBarSampler);
+        mainHandler.removeCallbacks(statusBarSampler);
         super.onPause();
         CookieManager.getInstance().flush();
     }
@@ -552,7 +587,10 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         isSamplingStatusBar = false;
-        statusBarHandler.removeCallbacks(statusBarSampler);
+        mainHandler.removeCallbacks(statusBarSampler);
+        if (samplerThread != null) {
+            samplerThread.quitSafely();
+        }
         sampleBitmap.recycle();
         closePopupWebView();
         if (webView != null) {
