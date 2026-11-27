@@ -1,0 +1,60 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.antidroid.antigravity'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.antidroid.antigravity"
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "1.0.0"
+    }
+
+    signingConfigs {
+        release {
+            def ksPropsFile = file("${rootProject.projectDir}/keystore.properties")
+            def ksProps = new Properties()
+            if (ksPropsFile.exists()) {
+                ksPropsFile.withInputStream { ksProps.load(it) }
+            }
+            def ksPath = ksProps.getProperty("storeFile") ?: System.getenv("KEYSTORE_FILE")
+            if (ksPath != null && rootProject.file(ksPath).exists()) {
+                storeFile rootProject.file(ksPath)
+                storePassword ksProps.getProperty("storePassword") ?: System.getenv("KEYSTORE_PASSWORD")
+                keyAlias ksProps.getProperty("keyAlias") ?: System.getenv("KEY_ALIAS")
+                keyPassword ksProps.getProperty("keyPassword") ?: System.getenv("KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (signingConfigs.release.storeFile != null) {
+                signingConfig signingConfigs.release
+            }
+        }
+        debug {
+            applicationIdSuffix ".debug"
+            versionNameSuffix "-debug"
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation(platform('org.jetbrains.kotlin:kotlin-bom:1.8.22'))
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.core:core:1.13.1'
+    implementation 'androidx.webkit:webkit:1.11.0'
+}
