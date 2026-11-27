@@ -9,11 +9,15 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Color;
+import android.graphics.Rect;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.Message;
+import android.view.PixelCopy;
 import android.view.View;
 import android.webkit.CookieManager;
 import android.webkit.PermissionRequest;
@@ -64,6 +68,7 @@ public class MainActivity extends AppCompatActivity {
             "ssl.gstatic.com"
     ));
 
+    private FrameLayout rootContainer;
     private WebView webView;
     private FrameLayout popupContainer;
     private WebView popupWebView;
@@ -71,6 +76,22 @@ public class MainActivity extends AppCompatActivity {
     private LinearLayout splashOverlay;
     private LinearLayout errorOverlay;
     private TextView errorMessage;
+
+    private int statusBarHeight = 0;
+    private int currentStatusBarColor = Color.parseColor("#070707");
+    private final Handler statusBarHandler = new Handler(Looper.getMainLooper());
+    private final Bitmap sampleBitmap = Bitmap.createBitmap(5, 1, Bitmap.Config.ARGB_8888);
+    private boolean isSamplingStatusBar = false;
+
+    private final Runnable statusBarSampler = new Runnable() {
+        @Override
+        public void run() {
+            sampleTopEdgeColor();
+            if (isSamplingStatusBar) {
+                statusBarHandler.postDelayed(this, 250);
+            }
+        }
+    };
 
     private boolean firstPageLoaded = false;
     private boolean hasMainFrameError = false;
@@ -119,7 +140,7 @@ public class MainActivity extends AppCompatActivity {
 
         configureSystemBars();
 
-        FrameLayout rootContainer = findViewById(R.id.root_container);
+        rootContainer = findViewById(R.id.root_container);
         webView = findViewById(R.id.webview);
         popupContainer = findViewById(R.id.popup_container);
         progressBar = findViewById(R.id.progress_bar);
@@ -131,6 +152,7 @@ public class MainActivity extends AppCompatActivity {
         ViewCompat.setOnApplyWindowInsetsListener(rootContainer, (view, windowInsets) -> {
             Insets statusInsets = windowInsets.getInsets(WindowInsetsCompat.Type.statusBars());
             Insets imeInsets = windowInsets.getInsets(WindowInsetsCompat.Type.ime());
+            statusBarHeight = statusInsets.top;
             view.setPadding(statusInsets.left, statusInsets.top, statusInsets.right, imeInsets.bottom);
             return WindowInsetsCompat.CONSUMED;
         });
@@ -184,11 +206,48 @@ public class MainActivity extends AppCompatActivity {
         WindowInsetsControllerCompat controller =
                 WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
         if (controller != null) {
-            controller.setAppearanceLightStatusBars(false);
+            updateStatusBarIconContrast(controller, currentStatusBarColor);
             controller.setAppearanceLightNavigationBars(false);
             controller.setSystemBarsBehavior(
                     WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
             controller.hide(WindowInsetsCompat.Type.navigationBars());
+        }
+    }
+
+    private void updateStatusBarIconContrast(WindowInsetsControllerCompat controller, int color) {
+        double luminance = (0.299 * Color.red(color)
+                + 0.587 * Color.green(color)
+                + 0.114 * Color.blue(color)) / 255.0;
+        controller.setAppearanceLightStatusBars(luminance > 0.5);
+    }
+
+    private void sampleTopEdgeColor() {
+        if (!isSamplingStatusBar || sampleBitmap.isRecycled() || statusBarHeight <= 0
+                || rootContainer == null
+                || rootContainer.getWidth() < 20
+                || rootContainer.getHeight() <= statusBarHeight + 10) {
+            return;
+        }
+        int y = statusBarHeight + 4;
+        Rect srcRect = new Rect(4, y, 9, y + 1);
+        try {
+            PixelCopy.request(getWindow(), srcRect, sampleBitmap, copyResult -> {
+                if (copyResult == PixelCopy.SUCCESS && !sampleBitmap.isRecycled()) {
+                    int pixel = sampleBitmap.getPixel(2, 0);
+                    int opaqueColor = Color.rgb(Color.red(pixel), Color.green(pixel), Color.blue(pixel));
+                    if (opaqueColor != currentStatusBarColor) {
+                        currentStatusBarColor = opaqueColor;
+                        rootContainer.setBackgroundColor(opaqueColor);
+                        WindowInsetsControllerCompat controller =
+                                WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+                        if (controller != null) {
+                            updateStatusBarIconContrast(controller, opaqueColor);
+                        }
+                    }
+                }
+            }, statusBarHandler);
+        } catch (IllegalArgumentException ignored) {
+            // Window surface not ready yet
         }
     }
 
@@ -475,13 +534,26 @@ public class MainActivity extends AppCompatActivity {
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        isSamplingStatusBar = true;
+        statusBarHandler.removeCallbacks(statusBarSampler);
+        statusBarHandler.postDelayed(statusBarSampler, 200);
+    }
+
+    @Override
     protected void onPause() {
+        isSamplingStatusBar = false;
+        statusBarHandler.removeCallbacks(statusBarSampler);
         super.onPause();
         CookieManager.getInstance().flush();
     }
 
     @Override
     protected void onDestroy() {
+        isSamplingStatusBar = false;
+        statusBarHandler.removeCallbacks(statusBarSampler);
+        sampleBitmap.recycle();
         closePopupWebView();
         if (webView != null) {
             webView.destroy();
